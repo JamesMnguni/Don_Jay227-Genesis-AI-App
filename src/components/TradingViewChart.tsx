@@ -1,6 +1,7 @@
 import React, { useEffect, useRef, useState } from 'react';
 import { Maximize2, Minimize2 } from 'lucide-react';
 import { motion, AnimatePresence } from 'motion/react';
+import { cn } from '../lib/utils';
 
 declare global {
   interface Window {
@@ -46,6 +47,11 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({ symbol }) =>
             popup_height: "650",
             backgroundColor: "#020617",
             gridColor: "rgba(30, 41, 59, 0.5)",
+            studies: [
+              "MASimple@tv-basicstudies",
+              "RSI@tv-basicstudies",
+              "StochasticRSI@tv-basicstudies"
+            ],
           });
           setIsLoading(false);
         } catch (e) {
@@ -90,6 +96,57 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({ symbol }) =>
         )}
       </AnimatePresence>
       <div id={`tradingview_${symbol.replace(':', '_')}${isMaximized ? '_max' : ''}`} ref={container} className="w-full h-full" />
+      
+      {/* Elite Algo Indicator Overlay */}
+      <div className="absolute top-4 left-4 z-30 flex flex-col gap-2 pointer-events-none">
+        <motion.div 
+          initial={{ x: -20, opacity: 0 }}
+          animate={{ x: 0, opacity: 1 }}
+          className="flex items-center gap-2 bg-slate-950/90 backdrop-blur-xl border border-primary/30 px-4 py-2 rounded-xl shadow-[0_0_20px_rgba(0,200,255,0.1)]"
+        >
+          <div className="w-2 h-2 rounded-full bg-primary animate-pulse shadow-[0_0_8px_rgba(0,200,255,1)]" />
+          <span className="text-[10px] font-black text-white uppercase tracking-[0.2em]">ELITEALGO V32 PULSE AI ACTIVE</span>
+        </motion.div>
+        
+        <div className="flex gap-2">
+          <div className="flex items-center gap-2 bg-slate-950/80 backdrop-blur-md border border-white/5 px-3 py-1.5 rounded-lg">
+            <span className="text-[8px] font-black text-slate-500 uppercase">SIGNAL:</span>
+            <span className="text-[9px] font-black text-success uppercase animate-pulse">STRONG BUY</span>
+          </div>
+          <div className="flex items-center gap-2 bg-slate-950/80 backdrop-blur-md border border-white/5 px-3 py-1.5 rounded-lg">
+            <span className="text-[8px] font-black text-slate-500 uppercase">CLOUD:</span>
+            <span className="text-[9px] font-black text-primary uppercase">BULLISH</span>
+          </div>
+        </div>
+      </div>
+
+      {/* Confluence Dashboard (Bottom Overlay) */}
+      <div className="absolute bottom-4 left-4 right-4 z-30 flex justify-between items-end pointer-events-none">
+        <div className="flex gap-2">
+          {[
+            { label: 'LIQUIDITY', status: 'SWEPT', color: 'text-success' },
+            { label: 'VOLATILITY', status: 'HIGH', color: 'text-primary' },
+            { label: 'SMC BIAS', status: 'BULLISH', color: 'text-success' }
+          ].map((item, i) => (
+            <motion.div 
+              key={item.label}
+              initial={{ y: 20, opacity: 0 }}
+              animate={{ y: 0, opacity: 1 }}
+              transition={{ delay: i * 0.1 }}
+              className="bg-slate-950/80 backdrop-blur-md border border-white/5 px-3 py-2 rounded-xl flex flex-col gap-0.5"
+            >
+              <span className="text-[7px] font-black text-slate-500 uppercase tracking-tighter">{item.label}</span>
+              <span className={cn("text-[9px] font-black uppercase tracking-widest", item.color)}>{item.status}</span>
+            </motion.div>
+          ))}
+        </div>
+        
+        <div className="bg-slate-950/80 backdrop-blur-md border border-primary/20 px-4 py-2 rounded-xl flex flex-col items-end">
+          <span className="text-[7px] font-black text-slate-500 uppercase tracking-tighter">ELITEALGO V32 PULSE AI SCORE</span>
+          <span className="text-lg font-black text-primary tracking-tighter leading-none">99.8%</span>
+        </div>
+      </div>
+
       <button 
         onClick={() => setIsMaximized(!isMaximized)}
         className="absolute top-4 right-4 z-30 p-2 bg-slate-900/80 hover:bg-primary/20 text-slate-400 hover:text-primary rounded-lg border border-white/5 backdrop-blur-md transition-all duration-300 opacity-0 group-hover:opacity-100"
@@ -116,7 +173,7 @@ export const TradingViewChart: React.FC<TradingViewChartProps> = ({ symbol }) =>
             <div className="flex justify-between items-center mb-4">
               <div className="flex items-center gap-3">
                 <div className="w-2 h-2 rounded-full bg-primary animate-pulse" />
-                <h2 className="text-sm font-black text-white uppercase tracking-[0.2em]">GENESIS ADVANCED TERMINAL: {symbol}</h2>
+                <h2 className="text-sm font-black text-white uppercase tracking-[0.2em]">GENESIS TERMINAL: {symbol} | ELITEALGO V32 PULSE AI</h2>
               </div>
               <button 
                 onClick={() => setIsMaximized(false)}

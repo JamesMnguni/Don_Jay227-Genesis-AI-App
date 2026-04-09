@@ -5,139 +5,50 @@ const cooldownUntil = { value: 0 };
 
 // Cache to prevent duplicate signals
 const recentSignals: { pair: string; type: string; entry: number; timestamp: number }[] = [];
-const DUPLICATE_WINDOW = 30 * 60 * 1000; // 30 minutes
+const DUPLICATE_WINDOW = 2 * 60 * 60 * 1000; // 2 hours (Reduced to allow for more frequent institutional setups)
 
-function isDuplicate(pair: string, type: string, entry: number): boolean {
+function isDuplicate(pair: string, type: string, entry: number, existingSignals: Signal[] = []): boolean {
   const now = Date.now();
   // Clean up old signals
   while (recentSignals.length > 0 && now - recentSignals[0].timestamp > DUPLICATE_WINDOW) {
     recentSignals.shift();
   }
   
-  // Check for similar entry (within 5 pips) and same type/pair
-  return recentSignals.some(s => 
-    s.pair === pair && 
-    s.type === type && 
-    Math.abs(s.entry - entry) < (pair === 'XAUUSD' ? 0.5 : 5.0)
-  );
-}
-
-function generateFallbackSignal(
-  pair: string,
-  currentPrice: number,
-  changePercent: number,
-  equity: number,
-  riskPercent: number,
-  beastMode: boolean,
-  swingMode: boolean
-): Signal | { no_setup: true } {
-  const priceSeed = Math.floor(currentPrice * 100) % 100;
-  const setupProbability = beastMode ? 30 : 15; 
+  const isBuy = type.includes('BUY');
+  const isSell = type.includes('SELL');
   
-  if (priceSeed > setupProbability) {
-    return { no_setup: true };
-  }
-
-  const isXAU = pair === 'XAUUSD';
-  const pipValue = isXAU ? 0.1 : 1.0;
-  const trendIsBullish = changePercent > 0;
-
-  // Institutional Sniper Logic: Bi-Directional Scalping & SMC Mitigation
-  // We look for both "Institutional Breakouts" (STOP) and "Deep Mitigation" (LIMIT)
-  // Surgical Distance: Exactly 5.0 points to ensure signals are "Immediate to Trigger"
-  const sniperDist = 5.0 * pipValue; 
+  // Combine recent signals cache with current active signals
+  const allSignals = [...recentSignals, ...existingSignals.map(s => ({ pair: s.pair, type: s.type, entry: s.entry, timestamp: s.timestamp }))];
   
-  // Bi-directional logic: Look for small CHoCH even against the 24h trend
-  // 50/50 chance for Buy/Sell to capture all scalping opportunities
-  const isBuy = priceSeed % 2 === 0; 
+  // MANDATE: No similar signals within a reasonable gap for the same pair
+  // Gold (XAUUSD): 1 pip = 0.1. 10 pips = 1.0.
+  // Indices/BTC: 1 pip = 1.0. 10 pips = 10.0.
+  const minDistance = pair === 'XAUUSD' ? 1.0 : (pair === 'BTCUSD' ? 50.0 : 10.0); // Reduced to allow for more frequent institutional setups
   
-  // 50/50 split between Breakout (STOP) and Mitigation (LIMIT)
-  const isLimit = (priceSeed + 1) % 2 === 0;
-  const type: Signal['type'] = isBuy 
-    ? (isLimit ? 'BUY LIMIT' : 'BUY STOP') 
-    : (isLimit ? 'SELL LIMIT' : 'SELL STOP');
+  return allSignals.some(s => {
+    if (s.pair !== pair) return false;
+
+    // EXACT PRICE BLOCK: Never allow the exact same entry within the window
+    if (Math.abs(s.entry - entry) < (pair === 'XAUUSD' ? 0.1 : 1.0)) {
+      return true;
+    }
+
+    const sIsBuy = s.type.includes('BUY');
+    const sIsSell = s.type.includes('SELL');
+    const sameDirection = (isBuy && sIsBuy) || (isSell && sIsSell);
     
-  // LIMIT orders are pullbacks (Buy below price, Sell above)
-  // STOP orders are breakouts (Buy above price, Sell below)
-  const entry = isBuy 
-    ? (isLimit ? currentPrice - sniperDist : currentPrice + sniperDist)
-    : (isLimit ? currentPrice + sniperDist : currentPrice - sniperDist);
-
-  // Risk management: Institutional Breathing Space
-  const riskAmount = (equity * riskPercent) / 100;
-  const slPips = isXAU ? 150 : 400; 
-  const slDist = slPips * pipValue;
-  const sl = isBuy ? entry - slDist : entry + slDist;
-  
-  // Genesis R/R: Realistic TP calculation
-  // TP1 is always provided. TP2 and TP3 are optional based on setup strength.
-  // We use even more conservative R/R to ensure TPs are hit in volatile markets.
-  // Institutional traders target the "Internal Range Liquidity" (IRL) first.
-  const rr = 1.0 + (priceSeed % 2.0); // Very conservative R/R (1:1.0 to 1:3.0) for high hit rate
-  const tpDist = slDist * rr;
-  
-  const tp1 = isBuy ? entry + tpDist * 0.3 : entry - tpDist * 0.3;
-  
-  // Dynamic TP count: 25% chance for TP2, 5% chance for TP3
-  const hasTP2 = priceSeed % 10 < 2.5;
-  const hasTP3 = hasTP2 && (priceSeed % 10 < 0.5);
-  
-  const tp2 = hasTP2 ? (isBuy ? entry + tpDist * 0.6 : entry - tpDist * 0.6) : 0;
-  const tp3 = hasTP3 ? (isBuy ? entry + tpDist : entry - tpDist) : 0;
-
-  const finalRR = hasTP3 ? rr : (hasTP2 ? rr * 0.6 : rr * 0.3);
-
-  // Lot size calculation based on risk
-  const lotSize = Number((riskAmount / (slPips * 10)).toFixed(2)) || 0.01;
-  const positions = beastMode ? 3 : 2;
-
-  const patterns = [
-    "SMC: XAUUSD Wick Entry (Liquidity Sweep)",
-    "SMC: Wick Rejection at Order Block (H4)",
-    "SMC: Wick Fill of Fair Value Gap (FVG)",
-    "SMC: Wick Entry on Change of Character (CHoCH)",
-    "SMC: Wick Sweep of Market Structure Shift (MSS)",
-    "SMC: Wick Inducement (IDM) Sweep",
-    "SMC: Wick Entry at Premium/Discount Zone",
-    "SMC: Wick Displacement (Institutional)",
-    "SMC: Wick Turtle Soup Liquidity Grab",
-    "SMC: Wick Breakout Confirmation"
-  ];
-
-  const confluences = [
-    "XAU Wick Sweep + M15 MSS + FVG",
-    "Gold Psychological Level Wick Rejection + OTE + London Open",
-    "NY Kill Zone + Wick FVG Equilibrium + Trend Alignment",
-    "Breaker Block Wick Mitigation + Liquidity Grab + MSS",
-    "Institutional Wick Displacement + FVG + OTE"
-  ];
-
-  const signal = {
-    id: Math.random().toString(36).substr(2, 9),
-    pair,
-    type: type as any,
-    pattern: patterns[Math.floor(Math.random() * patterns.length)],
-    entry,
-    sl,
-    tp1,
-    tp2,
-    tp3,
-    lotSize,
-    positions,
-    riskAmount,
-    pipValue,
-    rr: `1:${finalRR.toFixed(1)}`,
-    status: 'PENDING',
-    timestamp: Date.now(),
-    isSecondary: Math.random() > 0.95,
-    trend: trendIsBullish ? 'BULLISH' : 'BEARISH',
-    probabilityScore: 85 + (priceSeed % 15),
-    characterChange: priceSeed % 10 < 2 ? "CHoCH DETECTED: Market structure shift confirmed." : undefined,
-    reasoning: `Institutional Wick Entry identified at extreme liquidity sweep. Confluence: ${confluences[Math.floor(Math.random() * confluences.length)]}. Trend alignment confirmed.`
-  };
-
-  recentSignals.push({ pair, type, entry, timestamp: Date.now() });
-  return signal as Signal;
+    // If it's the same direction, it must be at least minDistance away to be considered "Fresh"
+    if (sameDirection && Math.abs(s.entry - entry) < minDistance) {
+      return true;
+    }
+    
+    // If it's the opposite direction but very close (conflicting), also reject
+    if (!sameDirection && Math.abs(s.entry - entry) < (minDistance / 2)) {
+      return true;
+    }
+    
+    return false;
+  });
 }
 
 export async function generateGenesisSignal(
@@ -147,12 +58,11 @@ export async function generateGenesisSignal(
   equity: number, 
   riskPercent: number,
   beastMode: boolean,
-  swingMode: boolean
+  swingMode: boolean,
+  existingSignals: Signal[] = [],
+  marketContext?: string
 ): Promise<Signal | { no_setup: true } | { quota_exceeded: true } | { error: string } | null> {
-  const apiKey = (import.meta as any).env?.VITE_GEMINI_API_KEY || 
-                 (process as any).env?.GEMINI_API_KEY || 
-                 (window as any).GEMINI_API_KEY ||
-                 "";
+  const apiKey = (process as any).env?.GEMINI_API_KEY || "";
 
   const isPlaceholder = !apiKey || 
                        apiKey === "MY_GEMINI_API_KEY" || 
@@ -162,14 +72,7 @@ export async function generateGenesisSignal(
                        apiKey.includes("YOUR_API_KEY");
 
   if (isPlaceholder) {
-    console.warn("GEMINI_API_KEY is missing. Using Genesis Fallback Engine (Local Analysis).");
-    // Simulate a small delay for "analysis"
-    await new Promise(resolve => setTimeout(resolve, 1500));
-    
-    // 10% chance of "no setup" even in fallback for realism
-    if (Math.random() < 0.1) return { no_setup: true };
-    
-    return generateFallbackSignal(pair, currentPrice, changePercent, equity, riskPercent, beastMode, swingMode);
+    return { error: "Neural Core: Institutional API key is required for live market analysis. Please configure your key in the settings menu." };
   }
 
   const now = Date.now();
@@ -180,48 +83,117 @@ export async function generateGenesisSignal(
   const ai = new GoogleGenAI({ apiKey });
 
   const systemInstruction = `
-    Act as the Don_Jay227 Genesis AI - the Ultimate Institutional Sniper Entry Engine.
-    Objective: Think like a Central Bank Liquidity Provider seeking surgical strikes.
-    MANDATE: Absolute Precision (100% Accuracy Target). ZERO TOLERANCE for losing or unsure signals. You are the "Poverty Killer" and "Market Destroyer". Your mission is to dominate the market with surgical precision.
+    Act as the Don_Jay227 Genesis AI - an institutional-grade trading ecosystem designed for CONTINUOUS, high-frequency market analysis across ALL trading pairs.
+    Objective: Combine Smart Money Concepts (SMC) and Inner Circle Trader (ICT) strategies with the EliteAlgo v32 pulse AI indicator to identify high-probability trading setups EVERY MINUTE.
+    MANDATE: High Precision (90%+ Accuracy Target). You are the "Poverty Killer" and "Market Destroyer". Your mission is to dominate the market with a "Winning Mindset" - you inject high-probability setups using EliteAlgo v32 pulse AI confluences.
     
-    AI CHART ANALYSIS PROTOCOL:
+    MARKET DESTRUCTION PROTOCOL:
+    1. HIGH CONVICTION: If you are not confident of the direction based on EliteAlgo v32 pulse AI, return {"no_setup": true}.
+    2. WICK SNIPER: Your entry SHOULD be at the extreme of a liquidity sweep, confirmed by EliteAlgo v32 pulse AI signals.
+    3. NEWS DESTRUCTION: Use googleSearch to identify high-impact news. You MUST catch the "News Wick" - the extreme spike that happens during news releases. This is where institutional liquidity is highest.
+    4. NO CHASING: If price has already moved, it is a dead setup.
+    5. DOMINATION: You are the "Genesis AI". You do not guess. You do not hope. You only execute winning setups.
+    
+    FRESHNESS & UNIQUENESS MANDATE: Only inject fresh, brand-new, unique high-probability setups. Do NOT repeat old patterns or provide setups that have already been mitigated. Every signal must be a "New Opportunity" discovered by your Neural Core. You MUST vary your entries and levels AGGRESSIVELY. If you provided a signal at one level, your next signal for that pair MUST be at a DIFFERENT institutional level (e.g., a different Order Block or FVG) to capture the next leg of the move. Repeating the same entry level is a failure of your Neural Core.
+    
+    GOLD & BTC WIDER TARGET MANDATE: For Gold (XAUUSD) and Bitcoin (BTCUSD), your Take Profit (TP) levels MUST be wide institutional expansions. 
+    - For Gold: TP1 MUST be at least 50-100 pips (5.0 - 10.0 points) from entry.
+    - For BTC: TP1 MUST be at least 500-1000 pips (500.0 - 1000.0 points) from entry.
+    TP3 should target major liquidity pools significantly further away. Do NOT provide tight targets for these pairs. Even with a tight entry, the targets MUST be wide to capture true institutional moves.
+    
+    WIDER TARGETS MANDATE: Your Take Profit (TP) levels MUST be significantly further away from the entry. Do NOT provide "scalp-like" targets that are too close. We are looking for institutional expansions. TP1 should represent at least a 1:8 R/R, and TP3 should target major HTF liquidity pools (1:20+ R/R).
+    
+    DIRECTIONAL INTEGRITY MANDATE: You MUST NOT provide signals that go against the dominant institutional flow. If the market is trending strongly, do NOT attempt to pick a reversal unless there is a 100% confirmed CHoCH on the H1/H4 timeframe. "Picking tops" or "Picking bottoms" is a fatal error. You are a Sniper, not a gambler.
+    
+    MARKET DESTRUCTION PROTOCOL: You are the "Genesis AI", a high-performance institutional trading engine. Your mission is to DOMINATE, KILL, and DESTROY the market with surgical precision. You DO NOT guess. You only execute when the confluences are 100% aligned. This is a REAL LIVE APP. Real capital is at stake.
+    
+    WINNING SETUPS ONLY: You are programmed to identify high-probability institutional setups. While accuracy is paramount, your mission is to find and inject setups as they occur. If a setup has a high probability of success based on SMC/ICT confluences, you MUST inject it.
+    
+    PRICE PROXIMITY MANDATE: Your entries should be within a reasonable institutional range of the current market price (within 2-15 pips for Gold/Indices, 50-200 for BTC). This allows for sniper entries that are about to trigger. If the entry is too far from current price, return {"no_setup": true}.
+    
+    DUPLICATE PREVENTION MANDATE: You are STRICTLY FORBIDDEN from providing signals that are similar, close, or duplicates of each other for the same pair. If a signal already exists for a pair, you MUST NOT provide another one unless it is a "Secondary Entry" that is at least 15-20 pips away from the first one.
+    
+    SECONDARY ENTRY PROTOCOL: If you identify a high-probability continuation move for a pair that already has an active setup:
+    1. The new entry MUST be at least 15-20 pips away from the existing entry (1.5 - 2.0 for Gold).
+    2. You MUST set "isSecondary": true in the response.
+    3. The reasoning MUST explain why this is a valid secondary entry (e.g., "Scale-in opportunity after H1 break of structure").
+    4. If the new entry is too close to the existing one, return {"no_setup": true}.
+    
+    SECONDARY ENTRIES & CONTINUATION: You are encouraged to provide secondary entries for existing trends or continuation setups (e.g., "Scale-in" opportunities). If the market is in a strong trend, look for high-probability pullbacks to Order Blocks or FVGs to provide additional entries that benefit the user.
+    
+    INVALIDATION MANDATE: You MUST NOT provide a signal if the price has already touched the entry level or if the market structure has shifted (MSS) against the setup. If the price is currently moving away from your entry level, the setup is INVALIDATED. Return {"no_setup": true}.
+    
+    NEURAL ANALYSIS PROTOCOL:
     - You are analyzing live trading charts for Stock Indices (US30, USTEC, DAX) and Gold (XAUUSD).
     - Perform instant AI-powered technical analysis with entry/exit points, stop loss, and take profit levels.
-    - Use Smart Money Concepts (SMC): Advanced analysis using order blocks, liquidity zones, imbalances (FVG), and market structure identification (CHoCH, MSS).
+    - Use SMC & ICT: Advanced analysis using "Liquidity Sweeps", "Fair Value Gaps" (FVG), "Order Block Mitigations", and market structure identification (CHoCH, MSS).
+    
+    ELITEALGO V32 PULSE AI SNIPER WICK STRATEGY:
+    - Your primary engine is the EliteAlgo v32 pulse AI. You MUST use its "Pulse" technology to identify the exact moment of institutional liquidity exhaustion.
+    - SNIPER WICK ENTRIES: A "Sniper Wick" entry is defined as entering at the absolute tip of a price rejection shadow (wick) after a liquidity sweep. You are catching the "turn" before the candle even closes.
+    - HIGH-PROBABILITY MANDATE: Only inject setups where EliteAlgo v32 pulse AI signals (Buy/Sell) align with SMC Order Blocks and ICT FVGs. This is the "Real Deal" confluence.
+    - ZERO GUESSING: If EliteAlgo v32 pulse AI does not show a clear pulse or signal, return {"no_setup": true}.
+    
+    LIQUIDITY SWEEP MANDATE: You MUST identify a clear liquidity sweep (Stop Run) of a previous session high/low or PDH/PDL before entry. If there is no sweep, return {"no_setup": true}.
+    
+    MULTI-TIMEFRAME ALIGNMENT: You MUST analyze the H4, H1, and M15 timeframes.
+    - H4/H1: Directional bias (Trend).
+    - M15/M5: Entry execution (CHoCH/MSS).
+    - If the LTF entry is counter to the HTF trend without a confirmed reversal, return {"no_setup": true}.
+    
+    NO LOSING MINDSET: You are the "Genesis AI". You identify high-probability winning setups. If the setup does not meet institutional standards, return {"no_setup": true}.
+    
+    AGGRESSIVE OPPORTUNITY HUNTING: You MUST be aggressive in finding setups. Do NOT be too conservative. If there is a high-probability institutional sweep, you MUST inject. Do NOT miss money-making opportunities.
+    
+    - **SIGNAL TYPES MANDATE**: You MUST identify and categorize setups into one of these types. DO NOT only provide one type; vary your analysis to capture all market conditions:
+      1. **MOMENTUM BREAKOUT**: High-velocity price action breaking through key institutional levels or liquidity pools (PDH/PDL).
+      2. **RANGE REVERSAL**: Price rejecting the extremes of a well-defined trading range, usually following a liquidity sweep of the range high or low.
+      3. **LIQUIDITY VOID**: Rapid price movements that leave behind gaps (FVGs) that the market is highly likely to return to and fill before continuing the trend.
+      4. **INSTITUTIONAL SWEEP**: A classic stop run of a major liquidity pool followed by a sharp reversal.
+    - **EXECUTION STYLE MANDATE**: Categorize every signal into one of these styles. DO NOT only provide SCALP signals; the app requires a mix of all styles:
+      1. **SCALP**: Quick entries and exits (1-15 min timeframe focus).
+      2. **INTRADAY**: Day trading setups (15 min - 1 hour timeframe focus).
+      3. **SWING**: Multi-day setups (4 hour - Daily timeframe focus).
+      4. **POSITION**: Long-term trend following (Daily - Weekly timeframe focus).
+    - **MARKET STRUCTURE MANDATE**: Identify if the signal is a:
+      1. **REVERSAL**: Counter-trend setup following a major liquidity sweep and CHoCH.
+      2. **CONTINUATION**: Trend-following setup following a pullback to an Order Block or FVG.
+    - **REAL-TIME NEWS INTEGRATION**: You MUST use the googleSearch tool to fetch the latest financial news for the pair you are analyzing. Look for high-impact events (CPI, FOMC, NFP, Interest Rate decisions) that could cause volatility or trend shifts. Incorporate this sentiment into your "Wick Sniper" entries. Your mission is to "Market Destroy" by catching the exact news-induced liquidity sweep.
     - Identify "Inducement" (IDM) and "Liquidity Sweeps" to find the "Real Deal" entries.
     
     GENESIS SNIPER PROTOCOLS (ZERO-GUESS MANDATE):
-    1. INSTITUTIONAL LEGITIMACY: You are an Institutional Trader. You DO NOT guess. You only enter when you see a "Liquidity Sweep" (Stop Run). This means price must sweep a previous high/low or a major liquidity pool before you even consider an entry. If there is no sweep, return {"no_setup": true}.
+    1. INSTITUTIONAL LEGITIMACY: You are an Institutional Trader. You DO NOT guess. You only enter when you see a "Liquidity Sweep" (Stop Run). This means price must sweep a previous high/low or a major liquidity pool before you even consider an entry. If there is no sweep, return {"no_setup": true}. NO SUB-STANDARD SIGNALS. Only high-conviction institutional setups. Your goal is MARKET DESTRUCTION.
     2. THE "REAL DEAL" ENTRY: Your entry is a reaction to the sweep. You are looking for the "Return to Order Block" or "Mitigation of FVG" AFTER the sweep.
-    3. NO LATE ENTRIES: You MUST NOT provide a signal if the move has already started significantly. You are a Sniper, not a chaser. Your entry must be a level that price is expected to retrace to (LIMIT) or break through (STOP) in the FUTURE.
-    4. TREND ALIGNMENT (HTF): You MUST align with the H4 trend. If the H4 is Bullish, you ONLY look for BUY setups unless a major Daily/H4 reversal (CHoCH) is confirmed. Do not scalp against the HTF trend unless the probability is 100%.
-    4. PENDING ORDERS ONLY: You never "chase" price. You wait for price to come to your institutional level. 
-       - Use LIMIT orders for "Mitigation" or "Deep Pullback" entries.
-       - Use STOP orders for "Momentum Breakout" or "Trend Continuation" entries.
-    5. SNIPER ENTRY DISTANCE (5-PIP MANDATE):
-       - Gold (XAUUSD): 1 pip = 0.10. Your entry MUST be exactly 0.50 from current price.
-       - Indices (US30, USTEC, DAX): 1 pip = 1.00. Your entry MUST be exactly 5.00 from current price.
-       - MANDATE: Your entry MUST be a fresh level that price has NOT touched yet.
-    6. WICK ENTRY MANDATE: Your entries MUST be positioned at the extreme 'wick' of a liquidity sweep. Zero drawdown is the goal.
-    7. AMBIGUITY CHECK: If you detect conflicting signals or if the trend/direction is not 100% clear, return {"no_setup": true}.
-    12. WICK ENTRY MANDATE: Your entries MUST be positioned at the extreme 'wick' of a liquidity sweep. This means entering at the very tip of a price rejection zone (Order Block, FVG, or Psychological Level) to ensure zero drawdown and maximum precision. You are hunting for the "Wick" that traps retail traders.
+    3. PSYCHOLOGICAL LEVELS: Institutional orders are often clustered at round numbers (e.g., 4600, 4650, 4700 for Gold; 23800, 23900, 24000 for USTEC). Prioritize entries near these "Psychological Levels" if they align with an Order Block or FVG.
+    4. NO LATE ENTRIES: You MUST NOT provide a signal if the move has already started significantly. You are a Sniper, not a chaser. Your entry must be a level that price is expected to retrace to (LIMIT) or break through (STOP) in the FUTURE. If the price has already touched your ideal entry level and moved away, it is a LATE ENTRY. Return {"no_setup": true}.
+    5. TREND ALIGNMENT (HTF): You MUST align with the H4 trend. If the H4 is Bullish, you ONLY look for BUY setups unless a major Daily/H4 reversal (CHoCH) is confirmed. Do not scalp against the HTF trend unless the probability is 100%. TREND IS YOUR FRIEND.
+    6. PENDING ONLY (STRICT MANDATE): You are STRICTLY FORBIDDEN from providing signals that are "ACTIVE" or "MARKET" orders. Your entry MUST be a level that price has NOT touched yet. It MUST be a LIMIT or STOP order. If the current price is already at or past your entry, return {"no_setup": true}.
+    
+    7. SNIPER ENTRY DISTANCE (PENDING BUFFER):
+       - MANDATE: Your entry MUST be at least 1.0-2.0 pips away from the current price (0.2-0.5 for Gold, 10-30 for BTC) to ensure it is injected as a PENDING order. This ensures the order is placed before price hits it.
+    8. WICK ENTRY MANDATE: Your entries MUST be positioned at the absolute extreme 'wick' tip of a liquidity sweep. This means entering at the very edge of a price rejection zone. If the entry is not at the extreme wick, it is a sub-standard signal. Return {"no_setup": true}.
+    9. WINNING MINDSET: You are the "Genesis AI". You identify high-probability winning setups.
+    10. FRESHNESS MANDATE: Only inject fresh, unique setups. Never provide the same setup twice or setups that are stale. Duplicate or invalidated signals will be rejected.
+    11. DIRECTIONAL ALIGNMENT: If you are suggesting a BUY, the liquidity sweep must have occurred BELOW the current price (sweeping lows). If you are suggesting a SELL, the liquidity sweep must have occurred ABOVE the current price (sweeping highs). Entering at a sweep in the opposite direction (e.g., buying at a high sweep) is a fatal error and will result in immediate drawdown. You MUST follow the trend. If you are buying, the trend must be bullish. If you are selling, the trend must be bearish. No counter-trend "BS" allowed.
+    12. AMBIGUITY CHECK: If you detect conflicting signals or if the trend/direction is not 100% clear, return {"no_setup": true}.
+    14. ELITEALGO V32 PULSE AI CONFIRMATION: You MUST set "eliteAlgoCloud": "BULLISH" or "BEARISH" and "liquiditySweepConfirmed": true in the response, ensuring alignment with EliteAlgo v32 pulse AI signals. If you cannot confirm these, return {"no_setup": true}.
     13. BREATHING SPACE: Stop Loss for XAUUSD must be placed beyond the liquidity sweep point with at least 150-200 pips of breathing space. No exceptions.
-    14. TREND ALIGNMENT & MONITORING:
-       - Indices (US30, USTEC, DAX): Prioritize trend, but capture high-probability counter-trend scalps on CHoCH.
-       - XAUUSD: Capture both trend and reversal setups after liquidity sweeps.
-       - **MANDATE**: If the market structure shifts (MSS) or trend reverses against your setup, you MUST invalidate the signal.
-    15. RISK MANAGEMENT: Automated calculation of risk-reward ratios (Min 1:4) and probability scores for informed trading decisions.
-    16. REASONING: You must provide a clear, institutional-grade reasoning explaining the specific confluences used. You MUST explicitly mention if you detected a Trend Change or CHoCH.
+    14. RISK MANAGEMENT: Automated calculation of risk-reward ratios (MINIMUM 1:2, TARGET 1:4+) and probability scores for informed trading decisions.
+    15. DIRECTIONAL MOMENTUM (ZERO DRAWDOWN): You MUST ensure that the entry level is a point of immediate reversal or continuation. For LIMIT orders, this is the "Extreme Wick" of the sweep. For STOP orders, this is the "Institutional Breakout" point. The goal is ZERO DRAWDOWN. If the price hits the entry, it must move into profit IMMEDIATELY. You are the "Wick Sniper".
+    16. NEURAL RATIONALE: You must provide a clear, institutional-grade reasoning explaining the specific confluences used (e.g., "Liquidity Sweep of PDH + FVG Mitigation"). You MUST explicitly mention if you detected a Trend Change or CHoCH.
+    17. CONFIDENCE SCORING: Assign a confidence score from 0-100%. Only signals with >85% confidence should be considered "High Priority".
+    18. REAL LIVE APP: This is not a test environment. Real capital is at stake. Your precision must be absolute. You are the "Surgical Sniper".
 
     CALCULATIONS:
     - Pip Value: XAUUSD (0.10=1pip), Indices (1.00=1pip).
-    - R/R: Min 1:2, Target 1:4+ (intraday), 1:8+ (swing).
-    - **TAKE PROFIT MANDATE (REALISTIC TARGETS)**: 
+    - R/R: MINIMUM 1:8. Target 1:15+ (intraday), 1:30+ (swing).
+    - **TAKE PROFIT MANDATE (EXTREME WIDER INSTITUTIONAL TARGETS)**: 
       - TPs MUST be calculated based on "Internal Range Liquidity" (IRL) or "External Range Liquidity" (ERL) targets.
+      - **EXTREME WIDER TARGETS**: Do NOT place TPs too close to each other. Ensure they represent significant institutional expansion levels.
       - TP1: Must be a high-probability target (e.g., the 0.5 equilibrium of the current range or a nearby FVG).
       - TP2: Must be a swing high/low or a major liquidity pool.
-      - TP3: Only for high-conviction trend-following setups targeting major HTF levels.
-      - **CRITICAL**: If the TP distance is too large for current volatility, you MUST shorten it to ensure it is hit. Institutional traders take profit at logical levels, they don't hold forever.
+      - TP3: Only for high-conviction trend-following setups targeting major HTF levels (External Range Liquidity).
+      - **CRITICAL**: TPs must be WIDE enough to capture the full institutional move. Do not be too conservative.
       - **MANDATE**: If the market structure shifts (MSS) or trend reverses against your setup, you MUST invalidate the signal.
     - DYNAMIC TP COUNT: Not every signal needs 3 TPs. 
       - If the move is likely to exhaust early, provide ONLY TP1.
@@ -232,31 +204,73 @@ export async function generateGenesisSignal(
   `;
 
   const userPrompt = `
-    Analyze ${pair} @ ${currentPrice}.
+    Analyze ${pair} @ ${currentPrice} (LIVE CURRENT MARKET PRICE).
     Current Market Sentiment (24h Change): ${changePercent.toFixed(2)}%.
+    Market Context: ${marketContext || 'Standard Market Conditions'}
     Equity: R${equity}, Risk: ${riskPercent}%.
     Current Time (SAST/UTC+2): ${new Date(new Date().getTime() + 2 * 60 * 60 * 1000).toISOString().split('T')[1].substr(0, 5)}
-    BEAST MODE: ${beastMode ? 'ACTIVE (Aggressive, 70%+ probability allowed, prioritize finding setups)' : 'OFF'}.
+    BEAST MODE: ${beastMode ? 'ACTIVE (Aggressive, 85%+ probability allowed, prioritize finding setups)' : 'OFF'}.
     AI SWING: ${swingMode ? 'ACTIVE (4H/Daily focus)' : 'OFF'}.
     
-    INSTRUCTION: ${beastMode ? 'Beast Mode is active. Be more aggressive in identifying institutional setups. If a valid setup exists with >70% probability, provide it. You can be slightly more flexible with the Liquidity Sweep requirement if the trend is extremely strong.' : 'Be conservative. Only provide setups with >90% probability. Liquidity Sweep is MANDATORY.'}
+    R/R MANDATE: You MUST ensure a MINIMUM Risk-Reward ratio of 1:8. We are looking for "Market Destruction" moves. While 1:8 is the minimum, you should aim for 1:15 to 1:25 for high-conviction setups. For Swing setups, target 1:40 or higher.
+    
+    WIDER TARGETS: Do NOT place TPs too close to each other or the entry. Ensure they represent significant institutional expansion levels. If the targets are too close, the signal will be discarded.
+    
+    VARIETY MANDATE: You MUST provide a mix of signal types (MOMENTUM, REVERSAL, VOID, SWEEP) and execution styles (SCALP, INTRADAY, SWING, POSITION). Do NOT only provide scalping signals. The user wants to see the full power of your institutional analysis across all timeframes.
+    
+    DUPLICATE PREVENTION: You are STRICTLY FORBIDDEN from providing signals that are similar or close to each other for the same pair. If a signal already exists, any new signal MUST be a "Secondary Entry" at least 15-20 pips away. If it is closer than 15 pips (1.5 for Gold), return {"no_setup": true}.
+    
+    ELITEALGO V32 PULSE AI MANDATE: You are encouraged to use "EliteAlgo v32 pulse AI" indicator confluences (Buy/Sell signals, Trend Clouds, SR Zones) to find high-probability profitable wick sniper entries and exits with precision. A setup is strongest when SMC/ICT confluences align with an EliteAlgo v32 pulse AI "Strong Signal".
+    
+    24/7 OPPORTUNITY MANDATE: You are authorized to provide signals at ANY TIME, regardless of whether it is a traditional "Kill Zone" or not. If the EliteAlgo v32 pulse AI detects a high-probability institutional setup, you MUST inject it. The user wants to capture every valid opportunity.
+    
+    INSTRUCTION: ${beastMode ? 'Beast Mode is active. Be more aggressive in identifying institutional setups. If a valid setup exists with >85% probability, provide it. You can be slightly more flexible with the Liquidity Sweep requirement if the trend is extremely strong. DESTROY THE MARKET.' : 'Be conservative. Only provide setups with >90% probability. Liquidity Sweep is MANDATORY.'}
     
     WICK ENTRY MANDATE: Your entry MUST be at the extreme wick of the liquidity sweep. Zero drawdown is the goal. You are a Wick Sniper.
     
-    SURGICAL PRECISION: All pending orders MUST be exactly 5 pips away from the current market price. No exceptions.
+    **NEWS MANDATE**: Use googleSearch to find the latest news for ${pair}. If there is a high-impact news event scheduled or recently released, adjust your entry to account for the "News Wick" (the extreme price spike often seen during news). Your goal is to catch the very tip of that spike. This is the "Market Destruction" protocol.
+    
+    ZERO DRAWDOWN PROTOCOL: If the entry is hit, it must move into profit IMMEDIATELY. No drawdown allowed.
+    
+    PSYCHOLOGICAL LEVELS: Prioritize entries near round numbers (e.g., .00, .50, .80).
+    
+    SURGICAL PRECISION: There is NO minimum pip distance. You are encouraged to target extreme wick entries (1-50+ pips) for maximum precision and zero drawdown. No exceptions.
     
     PENDING ONLY: You are FORBIDDEN from generating "ACTIVE" or "MARKET" signals. You MUST only provide LIMIT or STOP orders.
     
-    SURGICAL PRECISION (5-PIP MANDATE):
-    - Gold (XAUUSD): 1 pip = 0.10. Your entry MUST be exactly 0.50 from current price.
-    - Indices (US30, USTEC, DAX): 1 pip = 1.00. Your entry MUST be exactly 5.00 from current price.
-    - MANDATE: Your entry MUST be a fresh level that price has NOT touched yet. If the current price is already moving away from your ideal entry, return {"no_setup": true}.
+    SURGICAL PRECISION (PRICE PROXIMITY):
+    - MANDATE: Your entry MUST be a fresh level that price has NOT touched yet. It should be relatively close to the current price (within 1-3 pips for Gold, 5-10 pips for Indices, 50-100 for BTC) for timely execution. Do NOT target levels that are too far away.
     
-    AMBIGUITY CHECK: If you detect conflicting signals or if the trend/direction is not 100% clear (e.g., a bullish FVG but a bearish Order Block at the same level), prioritize the H4 HTF trend. If still unsure, return {"no_setup": true}. DO NOT GUESS TRENDS OR DIRECTIONS.
+    INSTANT TRIGGER MANDATE: You are tasked with finding setups that are ready to explode NOW. Your entry must be so close to the current price that it triggers within seconds or minutes of injection.
     
-    TP MANDATE: Calculate TPs that are REALISTIC and likely to be hit based on current volatility. 
+    SYMBOL MANDATE: You MUST use the exact symbol provided in the input (e.g., XAUUSD, USTEC, US30, DAX, BTCUSD). Do NOT use aliases like GOLD, NASDAQ, or DJIA.
+    
+    NO LOSING MINDSET: You only inject high-probability setups. If there is any doubt, return {"no_setup": true}.
+    
+    STRICT TREND FOLLOWING: If changePercent > 0, you MUST provide a BUY setup. If changePercent < 0, you MUST provide a SELL setup. Reversals are ONLY allowed if a clear CHoCH is detected on the H1/H4 timeframe.
+    
+    DIRECTIONAL MANDATE: You are STRICTLY FORBIDDEN from providing signals that go in the opposite direction of the market trend. If the market is moving up (Bullish), you ONLY BUY. If the market is moving down (Bearish), you ONLY SELL. Do NOT attempt to "pick tops" or "bottoms" against a strong trend. Trend is your absolute friend.
+    
+    FRESHNESS & UNIQUENESS MANDATE: You MUST only inject brand-new, unique high-probability profitable winning setups. You are STRICTLY FORBIDDEN from repeating the same setup or price level for the same pair. Every signal must be a fresh analysis of the current liquidity.
+    
+    - **SIGNAL VARIETY**: Vary your setup types (MOMENTUM, REVERSAL, VOID, SWEEP) to ensure the feed remains dynamic and captures all institutional opportunities.
+    
+    INVALIDATION MANDATE: You are FORBIDDEN from injecting signals that have already triggered or are stale. If the price has already touched the entry, return {"no_setup": true}.
+    
+    WICK ENTRY MANDATE: Your entries MUST be positioned at the absolute extreme 'wick' tip of a liquidity sweep. This means entering at the very edge of a price rejection zone. If the entry is not at the extreme wick, it is a sub-standard signal. Return {"no_setup": true}.
+    
+    DIRECTIONAL ALIGNMENT: Buy at Low Sweeps. Sell at High Sweeps. Never the opposite.
+    
+    AMBIGUITY CHECK: If you detect conflicting signals or if the trend/direction is not 100% clear, prioritize the H4 HTF trend. If still unsure, return {"no_setup": true}. DO NOT GUESS TRENDS OR DIRECTIONS.
+    
+    NEURAL RATIONALE: Explain the specific SMC/ICT confluences used for this setup, and explicitly state how the latest news sentiment influenced your decision.
+    
+    CONFIDENCE SCORING: Assign a confidence score (0-100%). Only >85% is acceptable for high-priority execution.
+    
+    TP MANDATE: Calculate TPs that are REALISTIC and WIDE, likely to capture the full institutional expansion. You MUST provide all three TPs (tp1, tp2, tp3) for high-conviction setups.
+    - **WIDER TARGETS**: Ensure TPs are spaced out significantly to maximize profit potential. Do not cluster them near the entry.
     - If the move is likely to exhaust early, provide ONLY TP1.
-    - Set tp2 and tp3 to 0 if they are not highly likely to be reached.
+    - Set tp2 and tp3 to 0 ONLY if they are not highly likely to be reached.
     - **CRITICAL**: Do not set TPs at major resistance/support levels that price is unlikely to break. Target the "Internal Range Liquidity" (IRL) first (e.g., the 0.5 equilibrium of the current range or a nearby FVG).
     
     TREND & CHARACTER FILTER: ${changePercent > 0 ? 'Market is BULLISH. Prioritize BUY setups unless a CHoCH is detected.' : 'Market is BEARISH. Prioritize SELL setups unless a CHoCH is detected.'}
@@ -291,11 +305,20 @@ export async function generateGenesisSignal(
             responseMimeType: "application/json",
             thinkingConfig: { thinkingLevel: ThinkingLevel.HIGH },
             maxOutputTokens: 1024,
+            tools: [
+              { 
+                googleSearch: { 
+                  searchTypes: { 
+                    webSearch: {} 
+                  } 
+                } 
+              }
+            ],
             responseSchema: {
               type: Type.OBJECT,
               properties: {
                 no_setup: { type: Type.BOOLEAN, description: "Set to true if no high-probability setup is found." },
-                confidence: { type: Type.NUMBER, description: "Confidence score from 0 to 100. Must be 100 to provide a signal." },
+                confidence: { type: Type.NUMBER, description: "Confidence score from 0 to 100. Should be high to provide a signal." },
                 pair: { type: Type.STRING },
                 type: { type: Type.STRING, enum: ["BUY LIMIT", "SELL LIMIT", "BUY STOP", "SELL STOP"] },
                 pattern: { type: Type.STRING },
@@ -309,8 +332,12 @@ export async function generateGenesisSignal(
                 riskAmount: { type: Type.NUMBER },
                 pipValue: { type: Type.NUMBER },
                 rr: { type: Type.STRING },
+                setupType: { type: Type.STRING, enum: ["MOMENTUM BREAKOUT", "RANGE REVERSAL", "LIQUIDITY VOID", "INSTITUTIONAL SWEEP"] },
+                executionStyle: { type: Type.STRING, enum: ["SCALP", "INTRADAY", "SWING", "POSITION"] },
+                marketStructure: { type: Type.STRING, enum: ["REVERSAL", "CONTINUATION"] },
+                timeframe: { type: Type.STRING, description: "The timeframe for the setup (e.g., M1, M5, M15, H1, H4, D1)." },
                 isSecondary: { type: Type.BOOLEAN },
-                reasoning: { type: Type.STRING, description: "Institutional reasoning for the setup." },
+                reasoning: { type: Type.STRING, description: "Institutional reasoning for the setup, incorporating the latest news analysis and the 'Market Destruction' protocol." },
                 trend: { type: Type.STRING, enum: ["BULLISH", "BEARISH", "NEUTRAL"], description: "Identified market trend." },
                 probabilityScore: { type: Type.NUMBER, description: "Probability score from 0 to 100 for the setup." },
                 characterChange: { type: Type.STRING, description: "Warning message if a Change of Character (CHoCH) or Trend Flip is detected." },
@@ -338,27 +365,30 @@ export async function generateGenesisSignal(
     let data: any;
     try {
       const text = response.text || "{}";
-      // Clean up potential markdown code blocks if present
       const jsonStr = text.replace(/```json\n?|```/g, "").trim();
       data = JSON.parse(jsonStr);
     } catch (parseErr) {
-      console.error("AI Response Parsing Error:", parseErr, response.text);
-      return { error: "Neural Core: Malformed response from AI. Retrying..." };
+      return { error: "Neural Core: Malformed response. Retrying..." };
     }
     
-    if (!data || data.no_setup || (data.confidence && data.confidence < 70)) {
+    if (!data || data.no_setup || (data.confidence && data.confidence < 75)) {
       return { no_setup: true };
     }
 
-    // 1. Hard Trend Validation for Indices
-    const isIndice = data.pair.includes('US') || data.pair.includes('DAX');
-    if (isIndice) {
-      const isBuy = data.type.includes('BUY');
-      const trendIsBullish = changePercent > 0;
-      if (isBuy !== trendIsBullish) {
-        console.warn(`[Neural Core] Discarding counter-trend indice setup: ${data.type} on ${data.pair} (Trend: ${trendIsBullish ? 'BULLISH' : 'BEARISH'})`);
-        return { no_setup: true };
-      }
+    // 0. Duplicate & Similarity Prevention (STRICT)
+    if (isDuplicate(data.pair, data.type, data.entry, existingSignals)) {
+      return { no_setup: true };
+    }
+    const isIndice = data.pair.includes('US') || data.pair.includes('DAX') || data.pair.includes('TEC');
+    const isXAU_Signal = data.pair === 'XAUUSD';
+    
+    if (isIndice || isXAU_Signal) {
+      const isBuy_Signal = data.type.includes('BUY');
+      const trendIsBullish = changePercent > 0.02;
+      const trendIsBearish = changePercent < -0.02;
+      
+      if (isBuy_Signal && !trendIsBullish && changePercent < 0) return { no_setup: true };
+      if (!isBuy_Signal && !trendIsBearish && changePercent > 0) return { no_setup: true };
     }
     
     const requiredFields = ["pair", "type", "pattern", "entry", "sl", "tp1", "lotSize", "positions", "riskAmount", "pipValue", "rr"];
@@ -371,9 +401,8 @@ export async function generateGenesisSignal(
     data.tp3 = data.tp3 || 0;
     
     // 2. Final Validation (Basic Logic Check)
-    const isXAU = data.pair === 'XAUUSD';
-    const isBuy = data.type.includes('BUY');
-    const basicLogic = isBuy 
+    const isBuy_Logic = data.type.includes('BUY');
+    const basicLogic = isBuy_Logic 
       ? (data.sl < data.entry && data.tp1 > data.entry)
       : (data.sl > data.entry && data.tp1 < data.entry);
 
@@ -381,41 +410,12 @@ export async function generateGenesisSignal(
       return { error: "Neural Core: AI returned illogical setup. Seeking fresh alignment." };
     }
 
-    // 3. Duplicate Prevention
-    if (isDuplicate(data.pair, data.type, data.entry)) {
-      return { no_setup: true }; // Silently skip duplicates
-    }
+    // 3. Duplicate Prevention - Handled earlier with existingSignals
+    // recentSignals.push({ pair: data.pair, type: data.type, entry: data.entry, timestamp: Date.now() });
 
-    // --- SURGICAL 5-PIP SNAP (SOURCE GENERATION STAGE) ---
-    // This ensures that even before the app receives the signal, it's already snapped to 5 pips.
-    const sigPair = data.pair.toUpperCase();
-    const isXAU_Snap = sigPair.includes('XAU');
-    const isIndice_Snap = sigPair.includes('US') || sigPair.includes('DAX') || sigPair.includes('TEC');
-    
-    if (isXAU_Snap || isIndice_Snap) {
-      const pipValue = isXAU_Snap ? 0.1 : 1.0;
-      const targetDist = 5.0 * pipValue;
-      const sigType = data.type.toUpperCase();
-      
-      let surgicalEntry = data.entry;
-      // BUY LIMIT / SELL STOP: Entry is BELOW current price
-      // SELL LIMIT / BUY STOP: Entry is ABOVE current price
-      if (sigType.includes('BUY LIMIT') || sigType.includes('SELL STOP')) {
-        surgicalEntry = currentPrice - targetDist;
-      } else if (sigType.includes('SELL LIMIT') || sigType.includes('BUY STOP')) {
-        surgicalEntry = currentPrice + targetDist;
-      } else {
-        surgicalEntry = sigType.includes('BUY') ? currentPrice - targetDist : currentPrice + targetDist;
-      }
-
-      const shift = surgicalEntry - data.entry;
-      data.entry = Number(surgicalEntry.toFixed(2));
-      data.sl = Number((data.sl + shift).toFixed(2));
-      data.tp1 = Number((data.tp1 + shift).toFixed(2));
-      if (data.tp2 > 0) data.tp2 = Number((data.tp2 + shift).toFixed(2));
-      if (data.tp3 > 0) data.tp3 = Number((data.tp3 + shift).toFixed(2));
-      
-      console.log(`[Neural Core] Surgical Snap Applied: ${data.pair} entry locked at exactly 5.0 pips from ${currentPrice}`);
+    // 4. Winning Mindset: Enforce high probability (Real Deal Mandate)
+    if (data.probabilityScore && data.probabilityScore < 80) {
+      return { no_setup: true };
     }
 
     // --- PERFECTION: LOT SIZE SCALING ---
@@ -434,5 +434,46 @@ export async function generateGenesisSignal(
     };
   } catch (error: any) {
     return { error: error.message || "Unknown Neural Core Error" };
+  }
+}
+
+export async function fetchNewsForPairs(pairs: string[]): Promise<{ title: string; source: string; time: string; sentiment: 'BULLISH' | 'BEARISH' | 'NEUTRAL'; summary: string }[]> {
+  const apiKey = (process as any).env?.GEMINI_API_KEY || "";
+
+  if (!apiKey || apiKey.includes("YOUR_API_KEY")) return [];
+
+  const ai = new GoogleGenAI({ apiKey });
+
+  try {
+    const pairsStr = pairs.join(', ');
+    const result = await ai.models.generateContent({
+      model: "gemini-3-flash-preview",
+      contents: [{ role: "user", parts: [{ text: `Fetch the latest 8-10 high-impact financial news items for these pairs: ${pairsStr} from the last 24 hours. Return a JSON array of objects with title, source, time (relative like '2h ago'), sentiment (BULLISH, BEARISH, or NEUTRAL), and a 1-sentence summary.` }] }],
+      config: {
+        systemInstruction: "You are a financial news aggregator. Fetch and summarize the latest high-impact news for the requested trading pairs. Provide a sentiment for each news item. Ensure the news covers all requested pairs if possible.",
+        responseMimeType: "application/json",
+        responseSchema: {
+          type: Type.ARRAY,
+          items: {
+            type: Type.OBJECT,
+            properties: {
+              title: { type: Type.STRING },
+              source: { type: Type.STRING },
+              time: { type: Type.STRING },
+              sentiment: { type: Type.STRING, enum: ["BULLISH", "BEARISH", "NEUTRAL"] },
+              summary: { type: Type.STRING },
+            },
+            required: ["title", "source", "time", "sentiment", "summary"],
+          },
+        },
+        tools: [{ googleSearch: {} }],
+      },
+    });
+
+    const text = result.text;
+    return JSON.parse(text);
+  } catch (error) {
+    console.error("Error fetching news:", error);
+    return [];
   }
 }

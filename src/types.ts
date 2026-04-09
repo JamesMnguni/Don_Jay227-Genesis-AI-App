@@ -15,11 +15,17 @@ export interface Signal {
   timestamp: number;
   status: 'PENDING' | 'ACTIVE' | 'TP1' | 'TP2' | 'TP3' | 'SL' | 'INVALIDATED' | 'TREND_CHANGE';
   rr: string;
+  setupType?: 'MOMENTUM BREAKOUT' | 'RANGE REVERSAL' | 'LIQUIDITY VOID' | 'INSTITUTIONAL SWEEP';
+  executionStyle?: 'SCALP' | 'INTRADAY' | 'SWING' | 'POSITION';
+  marketStructure?: 'REVERSAL' | 'CONTINUATION';
+  timeframe?: string;
   isSecondary?: boolean;
   reasoning?: string;
   trend?: 'BULLISH' | 'BEARISH' | 'NEUTRAL';
   probabilityScore?: number;
   characterChange?: string;
+  eliteAlgoCloud?: 'BULLISH' | 'BEARISH';
+  liquiditySweepConfirmed?: boolean;
 }
 
 export interface AppSettings {
